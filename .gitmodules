@@ -1,0 +1,6 @@
+[submodule "pico-sdk"]
+	path = pico-sdk
+	url = https://github.com/raspberrypi/pico-sdk.git
+[submodule "Pico-PIO-USB"]
+	path = Pico-PIO-USB
+	url = https://github.com/jfedor2/Pico-PIO-USB.git
