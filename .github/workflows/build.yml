@@ -1,0 +1,33 @@
+name: build
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'CMakeLists.txt'
+  workflow_call:
+  workflow_dispatch:
+defaults:
+  run:
+    shell: bash --noprofile --norc -x -e -o pipefail {0}
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - name: Install compiler, libraries and tools
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib srecord
+      - name: Build
+        run: |
+          mkdir artifacts
+          for board in pico pico2; do
+            mkdir build-$board
+            (cd build-$board && PICO_BOARD=$board cmake .. && make)
+            cp build-$board/gamepad.uf2 artifacts/gamepad-$board.uf2
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          path: artifacts/*

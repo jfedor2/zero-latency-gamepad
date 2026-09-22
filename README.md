@@ -1,30 +1,24 @@
-# Zero Latency Gamepad POC
+# Zero Latency Gamepad
 
-This is proof-of-concept code for a very low latency game controller firmware for the Raspberry Pi Pico and other boards with the RP2040 chip.
+This repository contains code for a very low latency game controller firmware that runs on boards with the RP2040 and RP2350 chips like the Raspberry Pi Pico and Pico 2.
 
-It uses a modified version of the [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB) library to read the inputs state at the last possible moment before the USB data transfer happens. It also overclocks the RP2040 chip to 240 MHz to make sure the processing happens fast enough and the transfer doesn't time out.
+Low latency is achieved by constantly writing the current GPIO pin state to the outgoing USB buffer via a DMA transfer from a PIO program. This way the inputs that are sent out always come from a very recent sampling of GPIO pin state.
 
-Because it uses the PIO implementation and not the native USB interface of the RP2040, you have to wire a second USB port to the board. Wire GPIO0 to the USB D+ line, GPIO1 to the USB D- line, VBUS to VBUS and GND to GND. Additionally put a 1.5k pull-up resistor between GPIO0 and the 3.3V pin.
+The report descriptor of the controller is written so that a single byte represents the state of 8 buttons that the controller exposes to the host. Limiting the input report's size to one byte means that the DATA transfer is also shorter, further reducing the controller's latency.
 
-You still flash the firmware using the regular USB port, but when you want to use it as a gamepad, connect to the second port that you added.
+The controller has 8 generic buttons, no analog sticks or triggers and no d-pad, you can however use it in real games by setting it up in Steam, mapping the buttons that it does have to the functions needed by your game.
 
-The rest of the GPIO pins can be used for buttons and D-pad.
+Wire your buttons to GPIO0-GPIO7 pins.
 
-![Wiring](images/wiring.jpg)
+See the [latest release](https://github.com/jfedor2/zero-latency-gamepad/releases/latest) for firmware downloads.
+
+(A previous version of this project used the Pico-PIO-USB library to achieve a similar result and it required some custom wiring. This version uses the native USB port on the chip.)
 
 ## How fast is it?
 
-I think it's within a microsecond or two of what's physically possible on Full Speed USB. Below you can see output from a logic analyzer showing that a button press happens 875 nanoseconds before the data transfer starts and it is reflected in the input report sent.
+I think it's within a microsecond or two of what's physically possible on Full Speed USB.
 
-(Technically, since the first two fields of the data packet are known in advance, we could push it a little bit further and read the inputs state even after the transfer starts. Let me know if you can pull that off.)
-
-![USB traffic](images/usb-traffic.png)
-
-## But what's the average latency?
-
-Because of the way the USB protocol works, average latency really isn't a good way of thinking about input device performance. The way it works is it's the host that decides at which time it wants the data transfer to happen. It sends an "IN" packet to the device and then it has a very short time to respond with the input report. If a button press happens 0.8ms before the host polls for input, there's nothing the device can do to speed it up, it has to wait for the host for the data transfer to happen.
-
-Therefore it makes more sense to ask: how late can the button press happen before the data transfer and still be reflected in the input report sent?
+Using a pre-release version of [my latency tester](https://github.com/jfedor2/latency-tester), I'm getting 504.4us average latency (button press to end of DATA packet).
 
 ## How to compile
 
@@ -34,6 +28,8 @@ cd zero-latency-gamepad
 git submodule update --init
 mkdir build
 cd build
-cmake ..
+PICO_BOARD=pico cmake ..
 make
 ```
+
+![USB traffic](images/usb-traffic.png)

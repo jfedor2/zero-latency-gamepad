@@ -1,0 +1,19 @@
+name: release
+on:
+  push:
+    tags: 'r*'
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+  create-release:
+    needs: [ build ]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: download
+          merge-multiple: true
+      - uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
+        with:
+          draft: true
+          files: download/*

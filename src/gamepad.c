@@ -1,198 +1,207 @@
+// Copyright (c) 2026 Jacek Fedorynski
+// SPDX-License-Identifier: MIT
+
+#include <stdlib.h>
 #include <string.h>
 
-#include "pico/multicore.h"
-#include "pico/stdlib.h"
+#include "bsp/board.h"
+#include "hardware/dma.h"
+#include "hardware/pio.h"
+#include "hardware/structs/usb.h"
+#include "tusb.h"
 
-#include "pio_usb.h"
-#include "usb_crc.h"
+#include "gpio_sample.pio.h"
 
-#define GPIO_MASK 0b00011100011111111111111111111100
-#define GPIO_SHIFT 2
-#define REPORT_SIZE 4
+#define USB_VID 0xCAFE
+#define USB_PID 0xBAFF
+#define EPNUM_HID_IN 0x81
+#define NUM_SAMPLED_GPIOS 8
 
-static usb_device_t* usb_device = NULL;
-
-const uint8_t desc_device[] = {
-    0x12,        // bLength
-    0x01,        // bDescriptorType (Device)
-    0x10, 0x01,  // bcdUSB 1.10
-    0x00,        // bDeviceClass (Use class information in the Interface Descriptors)
-    0x00,        // bDeviceSubClass
-    0x00,        // bDeviceProtocol
-    0x40,        // bMaxPacketSize0 64
-    0xFE, 0xCA,  // idVendor 0xCAFE
-    0x66, 0x06,  // idProduct 0x0666
-    0x00, 0x01,  // bcdDevice 2.00
-    0x01,        // iManufacturer (String Index)
-    0x02,        // iProduct (String Index)
-    0x00,        // iSerialNumber (String Index)
-    0x01,        // bNumConfigurations 1
+char const* string_desc_arr[] = {
+    (const char[]){ 0x09, 0x04 },  // 0: English (0x0409)
+    "Arasaka",                     // 1: Manufacturer
+    "Zero Latency Gamepad",        // 2: Product
 };
 
-const uint8_t hid_report_descriptor[] = {
-    0x05, 0x01,        // Usage Page (Generic Desktop Ctrls)
-    0x09, 0x05,        // Usage (Game Pad)
-    0xA1, 0x01,        // Collection (Application)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x25, 0x01,        //   Logical Maximum (1)
-    0x35, 0x00,        //   Physical Minimum (0)
-    0x45, 0x01,        //   Physical Maximum (1)
-    0x75, 0x01,        //   Report Size (1)
-    0x95, 0x1C,        //   Report Count (28)
-    0x05, 0x09,        //   Usage Page (Button)
-    0x19, 0x01,        //   Usage Minimum (0x01)
-    0x29, 0x1C,        //   Usage Maximum (0x1C)
-    0x81, 0x02,        //   Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0x05, 0x01,        //   Usage Page (Generic Desktop Ctrls)
-    0x25, 0x07,        //   Logical Maximum (7)
-    0x46, 0x3B, 0x01,  //   Physical Maximum (315)
-    0x75, 0x04,        //   Report Size (4)
-    0x95, 0x01,        //   Report Count (1)
-    0x65, 0x14,        //   Unit (System: English Rotation, Length: Centimeter)
-    0x09, 0x39,        //   Usage (Hat switch)
-    0x81, 0x42,        //   Input (Data,Var,Abs,No Wrap,Linear,Preferred State,Null State)
-    0xC0,              // End Collection
+uint8_t const desc_hid_report[] = {
+    0x05, 0x01,  // Usage Page (Generic Desktop Ctrls)
+    0x09, 0x05,  // Usage (Game Pad)
+    0xA1, 0x01,  // Collection (Application)
+    0x15, 0x00,  //   Logical Minimum (0)
+    0x25, 0x01,  //   Logical Maximum (1)
+    0x35, 0x00,  //   Physical Minimum (0)
+    0x45, 0x01,  //   Physical Maximum (1)
+    0x75, 0x01,  //   Report Size (1)
+    0x95, 0x08,  //   Report Count (8)
+    0x05, 0x09,  //   Usage Page (Button)
+    0x19, 0x01,  //   Usage Minimum (0x01)
+    0x29, 0x08,  //   Usage Maximum (0x08)
+    0x81, 0x02,  //   Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
+    0xC0,        // End Collection
 };
 
-const uint8_t* report_desc[] = { hid_report_descriptor };
+uint8_t report[1];
 
-const uint8_t desc_configuration[] = {
-    0x09,        // bLength
-    0x02,        // bDescriptorType (Configuration)
-    0x22, 0x00,  // wTotalLength 34
-    0x01,        // bNumInterfaces 1
-    0x01,        // bConfigurationValue
-    0x00,        // iConfiguration (String Index)
-    0x80,        // bmAttributes
-    0x32,        // bMaxPower 100mA
+int main(void) {
+    board_init();
+    tusb_init();
 
-    0x09,  // bLength
-    0x04,  // bDescriptorType (Interface)
-    0x00,  // bInterfaceNumber 0
-    0x00,  // bAlternateSetting
-    0x01,  // bNumEndpoints 1
-    0x03,  // bInterfaceClass
-    0x00,  // bInterfaceSubClass
-    0x00,  // bInterfaceProtocol
-    0x00,  // iInterface (String Index)
+    memset(report, 0, sizeof(report));
 
-    0x09,                                 // bLength
-    0x21,                                 // bDescriptorType (HID)
-    0x11, 0x01,                           // bcdHID 1.11
-    0x00,                                 // bCountryCode
-    0x01,                                 // bNumDescriptors
-    0x22,                                 // bDescriptorType[0] (HID)
-    sizeof(hid_report_descriptor), 0x00,  // wDescriptorLength[0]
-
-    0x07,        // bLength
-    0x05,        // bDescriptorType (Endpoint)
-    0x81,        // bEndpointAddress (IN/D2H)
-    0x03,        // bmAttributes (Interrupt)
-    0x40, 0x00,  // wMaxPacketSize 64
-    0x01,        // bInterval 1 (unit depends on device speed)
-};
-
-const char* string_descriptors_base[] = {
-    [0] = (const char[]){ 0x09, 0x04 },
-    [1] = "RP2040",
-    [2] = "Zero Latency Gamepad",
-};
-static string_descriptor_t str_desc[3];
-
-static void init_string_desc(void) {
-    for (int idx = 0; idx < 3; idx++) {
-        uint8_t len = 0;
-        uint16_t* wchar_str = (uint16_t*) &str_desc[idx];
-        if (idx == 0) {
-            wchar_str[1] = string_descriptors_base[0][0] |
-                           ((uint16_t) string_descriptors_base[0][1] << 8);
-            len = 1;
-        } else if (idx <= 3) {
-            len = strnlen(string_descriptors_base[idx], 31);
-            for (int i = 0; i < len; i++) {
-                wchar_str[i + 1] = string_descriptors_base[idx][i];
-            }
-
-        } else {
-            len = 0;
+    while (true) {
+        tud_task();
+        if (tud_hid_ready()) {
+            tud_hid_report(0, report, sizeof(report));
         }
-
-        wchar_str[0] = (0x03 << 8) | (2 * len + 2);
     }
+
+    return 0;
 }
 
-static usb_descriptor_buffers_t desc = {
-    .device = desc_device,
-    .config = desc_configuration,
-    .hid_report = report_desc,
-    .string = str_desc
-};
+static void gpio_dma_start(uint8_t* dest) {
+    static bool pio_initialized = false;
+    static PIO pio;
+    static uint sm;
+    static int dma_a, dma_b;
 
-static void init_gpio() {
-    gpio_init_mask(GPIO_MASK);
-    for (int i = 0; i < 32; i++) {
-        if ((GPIO_MASK >> i) & 1) {
+    if (!pio_initialized) {
+        uint offset;
+        bool ok = pio_claim_free_sm_and_add_program_for_gpio_range(&gpio_sample_program, &pio, &sm, &offset, 0, NUM_SAMPLED_GPIOS, false);
+        hard_assert(ok);
+        for (uint i = 0; i < NUM_SAMPLED_GPIOS; i++) {
+            pio_gpio_init(pio, i);
+        }
+        // pio_gpio_init() gives the pins to the PIO; make them inputs again.
+        pio_sm_set_consecutive_pindirs(pio, sm, 0, NUM_SAMPLED_GPIOS, false);
+
+        // Pull-up and invert so they read as 1 when low (button pressed).
+        for (uint i = 0; i < NUM_SAMPLED_GPIOS; i++) {
             gpio_pull_up(i);
+            gpio_set_inover(i, GPIO_OVERRIDE_INVERT);
+        }
+
+        pio_sm_config c = gpio_sample_program_get_default_config(offset);
+        sm_config_set_in_pins(&c, 0);
+        sm_config_set_in_shift(&c, false, true, NUM_SAMPLED_GPIOS);
+        sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+        sm_config_set_clkdiv(&c, 4);
+        pio_sm_init(pio, sm, offset, &c);
+
+        dma_a = dma_claim_unused_channel(true);
+        dma_b = dma_claim_unused_channel(true);
+        pio_initialized = true;
+    }
+
+    // The destination changes if the endpoint buffers get reallocated on a
+    // re-enumeration, so (re)configure the channels every time.
+    pio_sm_set_enabled(pio, sm, false);
+    dma_channel_abort(dma_a);
+    dma_channel_abort(dma_b);
+    pio_sm_clear_fifos(pio, sm);
+    pio_sm_restart(pio, sm);
+
+    // Two channels, each doing a single transfer and chaining to the other.
+    // The transfer count is reloaded on every trigger, so this never ends.
+    // The PIO pushes a byte at a time (autopush at 8 bits), so the FIFO's
+    // low byte is read and only a byte is written to the destination.
+    int channels[2] = { dma_a, dma_b };
+    for (int i = 0; i < 2; i++) {
+        dma_channel_config dc = dma_channel_get_default_config(channels[i]);
+        channel_config_set_transfer_data_size(&dc, DMA_SIZE_8);
+        channel_config_set_read_increment(&dc, false);
+        channel_config_set_write_increment(&dc, false);
+        channel_config_set_dreq(&dc, pio_get_dreq(pio, sm, false));
+        channel_config_set_chain_to(&dc, channels[1 - i]);
+        dma_channel_configure(channels[i], &dc, dest, &pio->rxf[sm], 1, false);
+    }
+
+    pio_sm_set_enabled(pio, sm, true);
+    dma_channel_start(dma_a);
+}
+
+// The endpoint buffer for EP1 IN lives in USB DPRAM; its offset is in the
+// endpoint control register.
+void tud_mount_cb(void) {
+    uint32_t offset = usb_dpram->ep_ctrl[(EPNUM_HID_IN & 0x7f) - 1].in & 0xffff;
+    gpio_dma_start((uint8_t*) ((uintptr_t) usb_dpram + offset));
+}
+
+tusb_desc_device_t const desc_device = {
+    .bLength = sizeof(tusb_desc_device_t),
+    .bDescriptorType = TUSB_DESC_DEVICE,
+    .bcdUSB = 0x0200,
+    .bDeviceClass = 0x00,
+    .bDeviceSubClass = 0x00,
+    .bDeviceProtocol = 0x00,
+    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
+
+    .idVendor = USB_VID,
+    .idProduct = USB_PID,
+    .bcdDevice = 0x0100,
+
+    .iManufacturer = 0x01,
+    .iProduct = 0x02,
+    .iSerialNumber = 0x00,
+
+    .bNumConfigurations = 0x01
+};
+
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
+
+uint8_t const desc_configuration[] = {
+    // Config number, interface count, string index, total length, attribute, power in mA
+    TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN, 0, 100),
+
+    // Interface number, string index, protocol, report descriptor len, EP IN address, size, polling interval
+    TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID_IN, CFG_TUD_HID_EP_BUFSIZE, 1)
+};
+
+uint8_t const* tud_descriptor_device_cb(void) {
+    return (uint8_t const*) &desc_device;
+}
+
+uint8_t const* tud_hid_descriptor_report_cb(uint8_t itf) {
+    return desc_hid_report;
+}
+
+uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
+    return 0;
+}
+
+void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+}
+
+uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
+    return desc_configuration;
+}
+
+uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
+    static uint16_t desc_str[32];
+
+    size_t len;
+
+    if (index == 0) {
+        memcpy(&desc_str[1], string_desc_arr[0], 2);
+        len = 1;
+    } else {
+        if (index >= sizeof(string_desc_arr) / sizeof(string_desc_arr[0])) {
+            return NULL;
+        }
+
+        const char* str = string_desc_arr[index];
+
+        len = strlen(str);
+        size_t const maxlen = sizeof(desc_str) / sizeof(desc_str[0]) - 1;
+        if (len > maxlen) {
+            len = maxlen;
+        }
+
+        for (size_t i = 0; i < len; i++) {
+            desc_str[1 + i] = str[i];
         }
     }
-}
 
-uint8_t dpad_lut[] = { 0x80, 0x60, 0x20, 0x80, 0x00, 0x70, 0x10, 0x00, 0x40, 0x50, 0x30, 0x40, 0x80, 0x60, 0x20, 0x80 };
+    desc_str[0] = (uint16_t) ((TUSB_DESC_STRING << 8) | (2 * len + 2));
 
-void last_minute_update(uint8_t* buffer) {
-    uint32_t gpio_state = (~gpio_get_all() & GPIO_MASK) >> GPIO_SHIFT;
-    uint8_t dpad_state = gpio_state & 0x0F;
-
-    gpio_state >>= 4;
-
-    buffer[0] = gpio_state;
-    buffer[1] = gpio_state >> 8;
-    buffer[2] = gpio_state >> 16;
-    buffer[3] = gpio_state >> 24;
-
-    buffer[3] |= dpad_lut[dpad_state];
-
-    uint16_t crc = 0xffff;
-
-    for (int idx = 0; idx < REPORT_SIZE; idx++) {
-        crc = (crc >> 8) ^ crc16_tbl[(crc ^ buffer[idx]) & 0xff];
-    }
-
-    crc ^= 0xffff;
-
-    buffer[REPORT_SIZE] = crc & 0xff;
-    buffer[REPORT_SIZE + 1] = crc >> 8;
-}
-
-void core1_main() {
-    sleep_ms(10);
-
-    init_gpio();
-
-    static pio_usb_configuration_t config = PIO_USB_DEFAULT_CONFIG;
-    init_string_desc();
-    usb_device = pio_usb_device_init(&config, &desc);
-
-    while (true) {
-        pio_usb_device_task();
-    }
-}
-
-int main() {
-    set_sys_clock_khz(240000, true);
-
-    sleep_ms(10);
-
-    multicore_reset_core1();
-    multicore_launch_core1(core1_main);
-
-    uint8_t report[REPORT_SIZE] = { 0, 0, 0, 0 };
-
-    while (true) {
-        if (usb_device != NULL) {
-            endpoint_t* ep = pio_usb_get_endpoint(usb_device, 1);
-            pio_usb_set_out_data(ep, report, sizeof(report));
-        }
-        sleep_us(100);
-    }
+    return desc_str;
 }

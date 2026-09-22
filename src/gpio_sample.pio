@@ -1,0 +1,5 @@
+.program gpio_sample
+
+; Continuously sample GPIO 0-7. Autopush (8 bit threshold) sends each sample
+; to the RX FIFO, stalling when the FIFO is full.
+    in pins, 8
